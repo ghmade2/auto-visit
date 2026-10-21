@@ -340,21 +340,9 @@ async function runCycle() {
 async function scheduler() {
     log('浏览器随机访问服务已启动。');
 
-    log(
-        `固定目标地址：${
-            config.baseTargetUrls.length > 0
-                ? config.baseTargetUrls.join(' | ')
-                : '无'
-        }`
-    );
+    log(`固定目标地址数量：${config.baseTargetUrls.length}`);
 
-    log(
-        `补充目标地址：${
-            config.additionalTargetUrls.length > 0
-                ? config.additionalTargetUrls.join(' | ')
-                : '无'
-        }`
-    );
+    log(`补充目标地址数量：${config.additionalTargetUrls.length}`);
 
     log(
         `随机间隔：${config.minIntervalMinutes} ～ ${config.maxIntervalMinutes} 分钟。`
@@ -421,7 +409,7 @@ function sendHtml(response, statusCode, html) {
 }
 
 function renderPage(message = '', isError = false) {
-    const baseUrlsText = config.baseTargetUrls.join('\n');
+    # const baseUrlsText = config.baseTargetUrls.join('\n');
     const additionalUrlsText = config.additionalTargetUrls.join('\n');
 
     /*
@@ -555,9 +543,8 @@ function renderPage(message = '', isError = false) {
         <h1>随机网页访问配置</h1>
 
         <p class="hint">
-            固定 URL 由部署平台环境变量 <code>TARGET_URLS</code> 控制，
-            每轮都会访问，不能在本页面删除或修改。
-            补充 URL 会在固定 URL 之后追加访问。
+            系统已配置固定访问地址，并会在每轮任务中自动执行访问。
+            您可以在下方增加补充访问地址；补充地址会追加到既有访问任务中。
         </p>
 
         <p class="hint">
@@ -569,11 +556,11 @@ function renderPage(message = '', isError = false) {
         ${statusMessage}
 
         <form method="post" action="${formAction}">
-            <label for="baseTargetUrls">
-                固定目标 URL（环境变量 TARGET_URLS）
-            </label>
+            # <label for="baseTargetUrls">
+                # 固定目标 URL（环境变量 TARGET_URLS）
+            # </label>
 
-            <textarea id="baseTargetUrls" readonly>${escapeHtml(baseUrlsText)}</textarea>
+            # <textarea id="baseTargetUrls" readonly>${escapeHtml(baseUrlsText)}</textarea>
 
             <label for="additionalTargetUrls">
                 补充访问 URL
