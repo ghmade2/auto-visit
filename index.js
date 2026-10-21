@@ -263,6 +263,20 @@ function escapeHtml(value = '') {
 async function visitUrl(browser, url) {
     const page = await browser.newPage();
 
+    page.on('response', (response) => {
+        const responseHeaders = response.headers();
+        const blitzStatus = responseHeaders['x-blitz-gate'];
+
+        if (blitzStatus) {
+            log(
+                `页面内部请求：HTTP=${response.status()}；` +
+                `Blitz 状态=${blitzStatus}；` +
+                `步骤=${responseHeaders['x-blitz-gate-step'] || '无'}；` +
+                `URL=${response.url()}`
+            );
+        }
+    });
+
     try {
         await page.setViewport({
             width: 1000,
@@ -300,27 +314,37 @@ async function visitUrl(browser, url) {
          * 最大等待时长由 WAKE_WAIT_MS 控制；
          * 没有设置时建议默认 120000（2 分钟）。
          */
-        const isWaking =
-            status === 503 &&
-            String(headers['x-blitz-gate'] || '').toLowerCase() === 'waking';
+        const blitzGateStatus = String(
+            headers['x-blitz-gate'] || ''
+        ).toLowerCase();
 
-        if (isWaking) {
+        /*
+         * asleep：服务尚未启动；
+         * waking：服务正在启动；
+         * ready：网关提示可稍后重新请求主页。
+         */
+        const needsBlitzWakeHandling =
+            status === 503 &&
+            ['asleep', 'waking', 'ready'].includes(blitzGateStatus);
+
+        if (needsBlitzWakeHandling) {
             const wakeWaitMs = Number.isFinite(config.wakeWaitMs)
                 ? config.wakeWaitMs
                 : 120000;
 
             const deadline = Date.now() + wakeWaitMs;
 
-            log(
-                `检测到服务正在唤醒。将最多等待 ${Math.round(
-                    wakeWaitMs / 1000
-                )} 秒，并按服务要求轮询。`
-            );
-
-            let pollCount = 0;
             const maxPolls = Math.max(
                 1,
                 Math.floor(config.wakeMaxPolls)
+            );
+
+            let pollCount = 0;
+
+            log(
+                `检测到 Blitz Gate 状态=${blitzGateStatus}。将最多等待 ${Math.round(
+                    wakeWaitMs / 1000
+                )} 秒，并按服务要求轮询。`
             );
 
             while (
@@ -333,14 +357,28 @@ async function visitUrl(browser, url) {
                  */
                 const retryAfterSeconds = Number(headers['retry-after']);
 
-                const pollWaitMs =
+                const configuredPollWaitMs =
                     Number.isFinite(retryAfterSeconds) &&
                     retryAfterSeconds > 0
                         ? retryAfterSeconds * 1000
                         : 5000;
 
+                /*
+                 * 避免单次等待超过整体唤醒等待上限。
+                 */
+                const remainingMs = deadline - Date.now();
+
+                const pollWaitMs = Math.min(
+                    configuredPollWaitMs,
+                    Math.max(0, remainingMs)
+                );
+
+                if (pollWaitMs <= 0) {
+                    break;
+                }
+
                 log(
-                    `服务仍在唤醒，${Math.round(
+                    `服务正在处理，${Math.round(
                         pollWaitMs / 1000
                     )} 秒后进行第 ${pollCount + 1}/${maxPolls} 次状态轮询。`
                 );
@@ -366,6 +404,7 @@ async function visitUrl(browser, url) {
                             cache: 'no-store',
                             credentials: 'same-origin',
                             headers: {
+                                'Cache-Control': 'no-cache',
                                 'X-Blitz-Gate-Poll': '1'
                             }
                         });
@@ -406,22 +445,55 @@ async function visitUrl(browser, url) {
                         pollResult.headers?.blitzGateStep || ''
                 };
 
+                const currentBlitzGateStatus = String(
+                    headers['x-blitz-gate'] || ''
+                ).toLowerCase();
+
                 log(
                     `第 ${pollCount}/${maxPolls} 次唤醒轮询响应：` +
                     `HTTP=${status || 'N/A'}；` +
-                    `Blitz 状态=${headers['x-blitz-gate'] || '无'}；` +
+                    `Blitz 状态=${currentBlitzGateStatus || '无'}；` +
                     `步骤=${headers['x-blitz-gate-step'] || '无'}；` +
                     `URL=${pollResult.url || url}`
                 );
 
                 /*
-                 * 不再是 waking，说明唤醒流程已经结束。
+                 * 已获得正常的 HTTP 成功响应。
+                 */
+                if (status >= 200 && status < 400) {
+                    log('轮询已获得成功 HTTP 响应。');
+                    break;
+                }
+
+                /*
+                 * ready 表示服务即将可用。
+                 * 遵守 retry-after 后，以普通页面导航重新请求主页。
                  */
                 if (
-                    String(headers['x-blitz-gate'] || '').toLowerCase() !==
-                    'waking'
+                    status === 503 &&
+                    currentBlitzGateStatus === 'ready'
                 ) {
-                    log('服务已结束唤醒状态，重新加载页面以进入实际服务。');
+                    const readyRetryAfterSeconds = Number(
+                        headers['retry-after']
+                    );
+
+                    const readyWaitMs =
+                        Number.isFinite(readyRetryAfterSeconds) &&
+                        readyRetryAfterSeconds > 0
+                            ? readyRetryAfterSeconds * 1000
+                            : 1000;
+
+                    log(
+                        `Blitz Gate 已返回 ready，${Math.round(
+                            readyWaitMs / 1000
+                        )} 秒后重新加载主页。`
+                    );
+
+                    await sleep(readyWaitMs);
+
+                    if (stopping) {
+                        break;
+                    }
 
                     response = await page.goto(url, {
                         waitUntil: 'domcontentloaded',
@@ -431,21 +503,34 @@ async function visitUrl(browser, url) {
                     status = response ? response.status() : 0;
                     headers = response ? response.headers() : {};
 
+                    const reloadBlitzGateStatus = String(
+                        headers['x-blitz-gate'] || ''
+                    ).toLowerCase();
+
                     log(
-                        `服务唤醒后的页面响应：HTTP=${status || 'N/A'}；` +
+                        `服务就绪后的主页响应：HTTP=${status || 'N/A'}；` +
+                        `Blitz 状态=${reloadBlitzGateStatus || '无'}；` +
                         `URL=${url}`
                     );
 
-                    break;
+                    if (status >= 200 && status < 400) {
+                        log('服务已成功唤醒，主页访问成功。');
+                        break;
+                    }
+
+                    /*
+                     * 如果重新加载后仍是 503，则不退出 while；
+                     * 下一轮会根据最新响应中的 retry-after 继续轮询。
+                     */
                 }
             }
 
-            if (
-                String(headers['x-blitz-gate'] || '').toLowerCase() ===
-                'waking'
-            ) {
+            if (status < 200 || status >= 400) {
                 log(
-                    `服务在规定时间内尚未唤醒。已完成 ${pollCount}/${maxPolls} 次轮询；` +
+                    `唤醒流程结束，但主页尚未成功响应；` +
+                    `HTTP=${status || 'N/A'}；` +
+                    `Blitz 状态=${headers['x-blitz-gate'] || '无'}；` +
+                    `已完成 ${pollCount}/${maxPolls} 次轮询；` +
                     `等待上限为 ${Math.round(wakeWaitMs / 1000)} 秒。`
                 );
             }
