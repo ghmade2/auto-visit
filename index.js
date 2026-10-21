@@ -449,7 +449,7 @@ async function visitUrl(browser, url) {
                     `等待上限为 ${Math.round(wakeWaitMs / 1000)} 秒。`
                 );
             }
-        ｝
+        }
 
         /*
          * 页面恢复或首次就正常打开后，额外等待一段时间，
