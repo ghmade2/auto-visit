@@ -20,7 +20,7 @@ const defaults = {
     PAGE_TIMEOUT_MS: '60000',
 
     // DOM 加载完成、网络基本空闲后，额外等待时间，单位：毫秒。
-    POST_LOAD_WAIT_MS: '3000',
+    POST_LOAD_WAIT_MS: '5000',
 
     // 建议在服务器中使用无头模式。
     HEADLESS: 'true',
@@ -36,10 +36,10 @@ const defaults = {
     PORT: '3000',
 
     // 唤醒等待时间
-    WAKE_WAIT_MS: '180000',
+    WAKE_WAIT_MS: '300000',
 
     // 唤醒时最大轮询次数
-    WAKE_MAX_POLLS: '10',
+    WAKE_MAX_POLLS: '30',
 
     // 建议在部署平台设置一个随机、较长的字符串。
     ADMIN_TOKEN: ''
