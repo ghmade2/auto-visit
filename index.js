@@ -409,7 +409,7 @@ function sendHtml(response, statusCode, html) {
 }
 
 function renderPage(message = '', isError = false) {
-    # const baseUrlsText = config.baseTargetUrls.join('\n');
+    // const baseUrlsText = config.baseTargetUrls.join('\n');
     const additionalUrlsText = config.additionalTargetUrls.join('\n');
 
     /*
@@ -556,11 +556,12 @@ function renderPage(message = '', isError = false) {
         ${statusMessage}
 
         <form method="post" action="${formAction}">
-            # <label for="baseTargetUrls">
-                # 固定目标 URL（环境变量 TARGET_URLS）
-            # </label>
-
-            # <textarea id="baseTargetUrls" readonly>${escapeHtml(baseUrlsText)}</textarea>
+            /* <label for="baseTargetUrls">
+             *    固定目标 URL（环境变量 TARGET_URLS）
+             * </label>
+             *
+             * <textarea id="baseTargetUrls" readonly>${escapeHtml(baseUrlsText)}</textarea>
+             */
 
             <label for="additionalTargetUrls">
                 补充访问 URL
