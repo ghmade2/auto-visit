@@ -35,6 +35,9 @@ const defaults = {
     // 管理页面端口。大部分平台会自动提供 PORT。
     PORT: '3000',
 
+    // 唤醒等待时间
+    WAKE_WAIT_MS: '180000',
+
     // 建议在部署平台设置一个随机、较长的字符串。
     ADMIN_TOKEN: ''
 };
@@ -137,6 +140,11 @@ function readConfigFromEnvironment() {
         postLoadWaitMs: getNumber(
             process.env.POST_LOAD_WAIT_MS,
             Number(defaults.POST_LOAD_WAIT_MS)
+        ),
+
+        wakeWaitMs: getNumber(
+            process.env.WAKE_WAIT_MS,
+            Number(defaults.WAKE_WAIT_MS)
         ),
 
         headless: getBoolean(
@@ -259,40 +267,178 @@ async function visitUrl(browser, url) {
 
         log(`开始访问：${url}`);
 
-        const response = await page.goto(url, {
-            /*
-             * DOM 加载完成后继续。
-             * 这样可避免部分包含 WebSocket、长连接的网站一直等待。
-             */
+        /*
+         * 首次正常打开页面。
+         * 若服务处于休眠状态，预期可能收到 503。
+         */
+        let response = await page.goto(url, {
             waitUntil: 'domcontentloaded',
             timeout: config.pageTimeoutMs
         });
 
+        let status = response ? response.status() : 0;
+        let headers = response ? response.headers() : {};
+
+        log(
+            `首次页面响应：HTTP=${status || 'N/A'}；` +
+            `Blitz 状态=${headers['x-blitz-gate'] || '无'}；` +
+            `URL=${url}`
+        );
+
         /*
-         * 尝试等待网络空闲。
-         * 即使超时，也不作为本次访问失败处理。
+         * Blitz Gate 返回 x-blitz-gate: waking 时，
+         * 按 retry-after 指定的时间间隔发起轮询请求。
+         *
+         * 最大等待时长由 WAKE_WAIT_MS 控制；
+         * 没有设置时建议默认 120000（2 分钟）。
          */
-        try {
-            await page.waitForNetworkIdle({
-                idleTime: 1000,
-                timeout: Math.min(config.pageTimeoutMs, 15000)
-            });
-        } catch {
-            log(`网络未在预期时间内空闲，继续处理：${url}`);
+        const isWaking =
+            status === 503 &&
+            String(headers['x-blitz-gate'] || '').toLowerCase() === 'waking';
+
+        if (isWaking) {
+            const wakeWaitMs = Number.isFinite(config.wakeWaitMs)
+                ? config.wakeWaitMs
+                : 120000;
+
+            const deadline = Date.now() + wakeWaitMs;
+
+            log(
+                `检测到服务正在唤醒。将最多等待 ${Math.round(
+                    wakeWaitMs / 1000
+                )} 秒，并按服务要求轮询。`
+            );
+
+            while (!stopping && Date.now() < deadline) {
+                /*
+                 * retry-after 单位通常为秒；异常时使用 5 秒。
+                 */
+                const retryAfterSeconds = Number(headers['retry-after']);
+                const pollWaitMs =
+                    Number.isFinite(retryAfterSeconds) &&
+                    retryAfterSeconds > 0
+                        ? retryAfterSeconds * 1000
+                        : 5000;
+
+                log(
+                    `服务仍在唤醒，${Math.round(
+                        pollWaitMs / 1000
+                    )} 秒后进行状态轮询。`
+                );
+
+                await sleep(pollWaitMs);
+
+                if (stopping) {
+                    break;
+                }
+
+                /*
+                 * 在同一个页面上下文中执行请求：
+                 * - 自动携带该页面已获得的同源 Cookie；
+                 * - 不使用或复制人工浏览器的 Cookie；
+                 * - 明确附带 X-Blitz-Gate-Poll: 1。
+                 */
+                const pollResult = await page.evaluate(async () => {
+                    try {
+                        const result = await fetch(window.location.href, {
+                            method: 'GET',
+                            cache: 'no-store',
+                            credentials: 'same-origin',
+                            headers: {
+                                'X-Blitz-Gate-Poll': '1'
+                            }
+                        });
+
+                        return {
+                            ok: result.ok,
+                            status: result.status,
+                            url: result.url,
+                            headers: {
+                                retryAfter:
+                                    result.headers.get('retry-after'),
+                                blitzGate:
+                                    result.headers.get('x-blitz-gate'),
+                                blitzGateStep:
+                                    result.headers.get('x-blitz-gate-step')
+                            }
+                        };
+                    } catch (error) {
+                        return {
+                            ok: false,
+                            status: 0,
+                            error: error.message
+                        };
+                    }
+                });
+
+                status = pollResult.status || 0;
+                headers = {
+                    'retry-after': pollResult.headers?.retryAfter || '',
+                    'x-blitz-gate': pollResult.headers?.blitzGate || '',
+                    'x-blitz-gate-step':
+                        pollResult.headers?.blitzGateStep || ''
+                };
+
+                log(
+                    `唤醒轮询响应：HTTP=${status || 'N/A'}；` +
+                    `Blitz 状态=${headers['x-blitz-gate'] || '无'}；` +
+                    `步骤=${headers['x-blitz-gate-step'] || '无'}；` +
+                    `URL=${pollResult.url || url}`
+                );
+
+                /*
+                 * 不再是 waking，说明服务已经结束唤醒流程。
+                 */
+                if (
+                    String(headers['x-blitz-gate'] || '').toLowerCase() !==
+                    'waking'
+                ) {
+                    log('服务已结束唤醒状态，重新加载页面以进入实际服务。');
+
+                    response = await page.goto(url, {
+                        waitUntil: 'domcontentloaded',
+                        timeout: config.pageTimeoutMs
+                    });
+
+                    status = response ? response.status() : 0;
+                    headers = response ? response.headers() : {};
+
+                    log(
+                        `服务唤醒后的页面响应：HTTP=${status || 'N/A'}；` +
+                        `URL=${url}`
+                    );
+
+                    break;
+                }
+            }
+
+            if (
+                String(headers['x-blitz-gate'] || '').toLowerCase() ===
+                'waking'
+            ) {
+                log(
+                    `等待服务唤醒超时（${Math.round(
+                        wakeWaitMs / 1000
+                    )} 秒）；本轮保留最后状态：HTTP=${status || 'N/A'}。`
+                );
+            }
         }
 
-        if (config.postLoadWaitMs > 0) {
+        /*
+         * 页面恢复或首次就正常打开后，额外等待一段时间，
+         * 让网站自身 JavaScript 完成初始化。
+         */
+        if (!stopping && config.postLoadWaitMs > 0) {
             await sleep(config.postLoadWaitMs);
         }
 
-        const title = await page.title();
-        const status = response ? response.status() : 'N/A';
+        const title = await page.title().catch(() => '');
 
-        log(`访问完成：HTTP=${status}；标题=${title}；URL=${url}`);
+        log(
+            `访问结束：HTTP=${status || 'N/A'}；` +
+            `标题=${title || '无'}；最终 URL=${page.url()}`
+        );
     } catch (error) {
-        /*
-         * 单个 URL 失败不会影响同一轮中其他 URL。
-         */
         log(`访问失败：${url}；原因：${error.message}`);
     } finally {
         await page.close().catch(() => {});
