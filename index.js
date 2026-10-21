@@ -394,11 +394,11 @@ function isAuthorized(request) {
     const adminToken = process.env.ADMIN_TOKEN;
 
     /*
-     * 未配置 ADMIN_TOKEN 时允许访问。
-     * 仅适用于管理页面不暴露于公共互联网的环境。
+     * 未配置 Token 时，禁止访问管理页面。
+     * 防止管理界面被公网直接访问。
      */
     if (!adminToken) {
-        return true;
+        return false;
     }
 
     const requestUrl = new URL(
@@ -839,7 +839,7 @@ function startManagementServer() {
             log('管理页面已启用 ADMIN_TOKEN 保护。');
         } else {
             log(
-                '警告：未设置 ADMIN_TOKEN。请不要将管理页面公开到互联网。'
+                '警告：未设置 ADMIN_TOKEN，管理页面已被禁止访问。'
             );
         }
     });
