@@ -38,6 +38,9 @@ const defaults = {
     // 唤醒等待时间
     WAKE_WAIT_MS: '180000',
 
+    // 唤醒时最大轮询次数
+    WAKE_MAX_POLLS: '10',
+
     // 建议在部署平台设置一个随机、较长的字符串。
     ADMIN_TOKEN: ''
 };
@@ -145,6 +148,11 @@ function readConfigFromEnvironment() {
         wakeWaitMs: getNumber(
             process.env.WAKE_WAIT_MS,
             Number(defaults.WAKE_WAIT_MS)
+        ),
+
+        wakeMaxPolls: getNumber(
+            process.env.WAKE_MAX_POLLS,
+            Number(defaults.WAKE_MAX_POLLS)
         ),
 
         headless: getBoolean(
@@ -309,11 +317,22 @@ async function visitUrl(browser, url) {
                 )} 秒，并按服务要求轮询。`
             );
 
-            while (!stopping && Date.now() < deadline) {
+            let pollCount = 0;
+            const maxPolls = Math.max(
+                1,
+                Math.floor(config.wakeMaxPolls)
+            );
+
+            while (
+                !stopping &&
+                Date.now() < deadline &&
+                pollCount < maxPolls
+            ) {
                 /*
                  * retry-after 单位通常为秒；异常时使用 5 秒。
                  */
                 const retryAfterSeconds = Number(headers['retry-after']);
+
                 const pollWaitMs =
                     Number.isFinite(retryAfterSeconds) &&
                     retryAfterSeconds > 0
@@ -323,7 +342,7 @@ async function visitUrl(browser, url) {
                 log(
                     `服务仍在唤醒，${Math.round(
                         pollWaitMs / 1000
-                    )} 秒后进行状态轮询。`
+                    )} 秒后进行第 ${pollCount + 1}/${maxPolls} 次状态轮询。`
                 );
 
                 await sleep(pollWaitMs);
@@ -332,11 +351,13 @@ async function visitUrl(browser, url) {
                     break;
                 }
 
+                pollCount += 1;
+
                 /*
                  * 在同一个页面上下文中执行请求：
-                 * - 自动携带该页面已获得的同源 Cookie；
-                 * - 不使用或复制人工浏览器的 Cookie；
-                 * - 明确附带 X-Blitz-Gate-Poll: 1。
+                 * - 自动携带该页面已经获得的同源 Cookie；
+                 * - 根据服务要求添加 X-Blitz-Gate-Poll: 1；
+                 * - 不使用人工浏览器中复制的 Cookie。
                  */
                 const pollResult = await page.evaluate(async () => {
                     try {
@@ -348,6 +369,11 @@ async function visitUrl(browser, url) {
                                 'X-Blitz-Gate-Poll': '1'
                             }
                         });
+
+                        /*
+                         * 读取响应内容后释放连接。
+                         */
+                        await result.text();
 
                         return {
                             ok: result.ok,
@@ -372,6 +398,7 @@ async function visitUrl(browser, url) {
                 });
 
                 status = pollResult.status || 0;
+
                 headers = {
                     'retry-after': pollResult.headers?.retryAfter || '',
                     'x-blitz-gate': pollResult.headers?.blitzGate || '',
@@ -380,14 +407,15 @@ async function visitUrl(browser, url) {
                 };
 
                 log(
-                    `唤醒轮询响应：HTTP=${status || 'N/A'}；` +
+                    `第 ${pollCount}/${maxPolls} 次唤醒轮询响应：` +
+                    `HTTP=${status || 'N/A'}；` +
                     `Blitz 状态=${headers['x-blitz-gate'] || '无'}；` +
                     `步骤=${headers['x-blitz-gate-step'] || '无'}；` +
                     `URL=${pollResult.url || url}`
                 );
 
                 /*
-                 * 不再是 waking，说明服务已经结束唤醒流程。
+                 * 不再是 waking，说明唤醒流程已经结束。
                  */
                 if (
                     String(headers['x-blitz-gate'] || '').toLowerCase() !==
@@ -417,12 +445,10 @@ async function visitUrl(browser, url) {
                 'waking'
             ) {
                 log(
-                    `等待服务唤醒超时（${Math.round(
-                        wakeWaitMs / 1000
-                    )} 秒）；本轮保留最后状态：HTTP=${status || 'N/A'}。`
+                    `服务在规定时间内尚未唤醒。已完成 ${pollCount}/${maxPolls} 次轮询；` +
+                    `等待上限为 ${Math.round(wakeWaitMs / 1000)} 秒。`
                 );
             }
-        }
 
         /*
          * 页面恢复或首次就正常打开后，额外等待一段时间，
